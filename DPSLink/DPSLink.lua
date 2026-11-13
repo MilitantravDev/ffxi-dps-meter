@@ -1,6 +1,6 @@
 _addon.name = 'DPSLink'
 _addon.author = 'MilitantravDev'
-_addon.version = '1.0.0'
+_addon.version = '1.0.1'
 _addon.commands = {'dpslink', 'dpsl'}
 
 -- Streams parsed combat actions from this character to the external DPS Meter app over UDP.
@@ -10,7 +10,6 @@ _addon.commands = {'dpslink', 'dpsl'}
 require('luau')
 local config = require('config')
 local res = require('resources')
-local socket = require('socket')
 
 local defaults = {
     host = '127.0.0.1',
@@ -21,19 +20,38 @@ local settings = config.load(defaults)
 
 -------------------------------------------------------------------------------
 -- UDP
+-- Nothing network-related happens while the addon is loading: the socket is opened a
+-- moment after load, inside pcall, and every send is non-blocking and pcall-guarded, so a
+-- socket problem is reported in chat instead of stalling the game thread.
 -------------------------------------------------------------------------------
+local socket = nil
 local udp = nil
+local ready = false
 local sent, errors = 0, 0
+local last_error = nil
+
+local function report(msg)
+    last_error = msg
+    windower.add_to_chat(167, '[DPSLink] ' .. msg)
+end
 
 local function open_socket()
+    ready = false
     if udp then pcall(function() udp:close() end) end
-    udp = socket.udp()
-    udp:settimeout(0)
-    local ok, err = udp:setpeername(settings.host, settings.port)
-    if not ok then
-        windower.add_to_chat(167, '[DPSLink] socket error: ' .. tostring(err))
-        udp = nil
+    udp = nil
+    if not socket then
+        local ok, mod = pcall(require, 'socket')
+        if not ok or not mod then report('could not load luasocket: ' .. tostring(mod)) return end
+        socket = mod
     end
+    local ok, err = pcall(function()
+        local s = assert(socket.udp())
+        s:settimeout(0)
+        assert(s:setpeername(settings.host, settings.port))
+        udp = s
+    end)
+    if not ok then report('socket error: ' .. tostring(err)) udp = nil return end
+    ready = true
 end
 
 -- Minimal JSON encoder (strings, numbers, booleans, arrays, objects)
@@ -65,12 +83,12 @@ encode = function(v)
 end
 
 local function send(tbl)
-    if not udp then return end
+    if not ready or not udp then return end
     local player = windower.ffxi.get_player()
     if not player then return end
     tbl.src = player.name
-    local ok = udp:send(encode(tbl))
-    if ok then sent = sent + 1 else errors = errors + 1 end
+    local ok, res_or_err = pcall(function() return udp:send(encode(tbl)) end)
+    if ok and res_or_err then sent = sent + 1 else errors = errors + 1 end
 end
 
 -------------------------------------------------------------------------------
@@ -236,12 +254,17 @@ local function heartbeat()
 end
 
 windower.register_event('prerender', function()
+    if not ready then return end
     local t = os.clock()
-    if t - last_hb >= settings.heartbeat then
-        last_hb = t
+    if t - last_hb < settings.heartbeat then return end
+    last_hb = t
+    local info = windower.ffxi.get_info()
+    if not (info and info.logged_in) then return end
+    local ok, err = pcall(function()
         refresh_allies()
         heartbeat()
-    end
+    end)
+    if not ok and err ~= last_error then report('heartbeat error: ' .. tostring(err)) end
 end)
 
 windower.register_event('zone change', function()
@@ -249,8 +272,11 @@ windower.register_event('zone change', function()
 end)
 
 windower.register_event('load', function()
-    open_socket()
-    refresh_allies()
+    -- Defer all setup until after the addon has finished loading.
+    coroutine.schedule(function()
+        open_socket()
+        if ready then windower.add_to_chat(207, string.format('[DPSLink] streaming to %s:%d', settings.host, settings.port)) end
+    end, 2)
 end)
 
 windower.register_event('unload', 'logout', function()
@@ -274,12 +300,17 @@ windower.register_event('addon command', function(cmd, ...)
         settings:save()
         open_socket()
         windower.add_to_chat(207, '[DPSLink] port ' .. settings.port)
+    elseif cmd == 'retry' then
+        open_socket()
+        windower.add_to_chat(207, '[DPSLink] ' .. (ready and 'socket open' or 'still no socket'))
     elseif cmd == 'reset' then
         send({ t = 'reset' })
         windower.add_to_chat(207, '[DPSLink] asked the app to reset.')
     else
         windower.add_to_chat(207, string.format('[DPSLink] -> %s:%d  packets sent %d, errors %d  (%s)',
-            settings.host, settings.port, sent, errors, udp and 'socket open' or 'NO SOCKET'))
+            settings.host, settings.port, sent, errors, ready and 'socket open' or 'NO SOCKET'))
+        if last_error then windower.add_to_chat(167, '  last error: ' .. last_error) end
+        if not ready then windower.add_to_chat(207, '  //dpsl retry  to try opening the socket again') end
         windower.add_to_chat(207, '  //dpsl host <ip> [port]   //dpsl port <n>   //dpsl reset')
     end
 end)

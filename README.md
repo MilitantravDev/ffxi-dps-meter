@@ -44,8 +44,8 @@ app/build.bat       builds dist/DPSMeter.exe with PyInstaller
 ```
 - Run from source: `python app/dpsmeter.py` (Python 3.10+, standard library only).
 - Build locally: `python -m pip install pyinstaller`, then `app\build.bat`.
-- For live testing, link the addon into Windower instead of copying it:
-  `mklink /J "<Windower>\addons\DPSLink" "<repo>\DPSLink"`
+- To test addon changes in game, run `install-addon.bat` (or `install-addon.bat "C:\path\to\Windower"`), then `//lua reload dpslink`.
+  It copies the addon instead of linking it: a junction or symlink inside a OneDrive-synced Windower folder can freeze the game client on load.
 
 ## Releases
 Push a version tag and GitHub Actions builds the exe and publishes a release with the exe, the addon zip and SHA-256 checksums:
