@@ -1,0 +1,8 @@
+dist/
+build/
+__pycache__/
+*.pyc
+*.spec
+settings.json
+app/settings.json
+DPSLink/data/
